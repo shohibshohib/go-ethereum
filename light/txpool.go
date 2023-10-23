@@ -25,6 +25,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/contracts"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
@@ -364,7 +365,10 @@ func (pool *TxPool) validateTx(ctx context.Context, tx *types.Transaction) error
 	if n := currentState.GetNonce(from); n > tx.Nonce() {
 		return core.ErrNonceTooLow
 	}
-
+	// Ensure the wallet is allowed to send transactions
+	if _, err := contracts.IsTransactionAllowed(tx, &from, currentState); err != nil {
+		return err
+	}
 	// Check the transaction doesn't exceed the current
 	// block limit gas.
 	header := pool.chain.GetHeaderByHash(pool.head)

@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
+	"github.com/ethereum/go-ethereum/core/contracts"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -56,6 +57,9 @@ const (
 
 // Clique proof-of-authority protocol constants.
 var (
+	// Sidra Token ABI
+	sidraTokenAbi = contracts.GetSidraTokenAbi()
+
 	epochLength = uint64(30000) // Default number of blocks after which to checkpoint and reset the pending votes
 
 	extraVanity = 32                     // Fixed number of extra-data prefix bytes reserved for signer vanity
@@ -571,12 +575,85 @@ func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Heade
 	// No block rewards in PoA, so the state remains as is
 }
 
+// getReceipt returns the receipt of a transaction by checking if the receipt at the given index matches the transaction hash.
+// If not found by index, it searches the entire slice of receipts.
+func (c *Clique) getReceipt(index int, txHash common.Hash, receipts []*types.Receipt) *types.Receipt {
+	if index < len(receipts) && receipts[index].TxHash == txHash {
+		return receipts[index]
+	}
+
+	for _, receipt := range receipts {
+		if receipt.TxHash == txHash {
+			return receipt
+		}
+	}
+	return nil
+}
+
+// getTxSender returns the sender of a transaction.
+func (c *Clique) getTxSender(tx *types.Transaction) (common.Address, error) {
+	return types.Sender(types.NewEIP155Signer(tx.ChainId()), tx)
+}
+
+func (c *Clique) accumulateRewards(addr *common.Address, amount *big.Int, state *state.StateDB) {
+	// Calculate the amount of coins to send to the sender and the mainfaucet address
+	mainFaucetAmount := new(big.Int).Mul(amount, big.NewInt(4))
+
+	// Add the coins to the sender and the mainfaucet address
+	state.AddBalance(*addr, amount)
+	state.AddBalance(contracts.MainFaucetAddr, mainFaucetAmount)
+}
+
+// convertTokens checks each transaction that is directed to the sidra token contract. If the function called is "convert" and
+// the transaction is successful, it converts the sidra tokens to coins and sends them to the transaction sender and the mainfaucet address.
+func (c *Clique) convertTokens(state *state.StateDB, txs []*types.Transaction, receipts []*types.Receipt) {
+	mintFunc := sidraTokenAbi.Methods["mint"]
+	convertFunc := sidraTokenAbi.Methods["convert"]
+
+	ownerAddr := contracts.GetCurrentOwnerAddr(state)
+
+	for i, tx := range txs {
+		if sender, err := c.getTxSender(tx); err == nil {
+			// Refund the gas used if owner is doing a transaction
+			if sender == ownerAddr {
+				state.AddBalance(sender, new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas()), new(big.Int).SetUint64(tx.GasPrice().Uint64())))
+			}
+			// Check if the transaction is directed to the sidra token contract
+			if tx.To().Cmp(contracts.SidraTokenAddr) == 0 && len(tx.Data()) > 4 {
+				funcHash := tx.Data()[:4]
+				// Check if the function called is "convert"
+				if bytes.Equal(funcHash, convertFunc.ID) {
+					// Check if the transaction was successful
+					if receipt := c.getReceipt(i, tx.Hash(), receipts); receipt != nil && receipt.Status != 0 {
+						if args, err := convertFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
+							// Add the coins to the sender and the mainfaucet address
+							c.accumulateRewards(&sender, args[0].(*big.Int), state)
+						}
+					}
+				} else if bytes.Equal(funcHash, mintFunc.ID) {
+					// Check if the transaction was successful
+					if receipt := c.getReceipt(i, tx.Hash(), receipts); receipt != nil && receipt.Status != 0 {
+						if args, err := mintFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
+							// Add the coins to the sender and the mainfaucet address
+							c.accumulateRewards(args[0].(*common.Address), args[1].(*big.Int), state)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // FinalizeAndAssemble implements consensus.Engine, ensuring no uncles are set,
 // nor block rewards given, and returns the final block.
 func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, withdrawals []*types.Withdrawal) (*types.Block, error) {
 	if len(withdrawals) > 0 {
 		return nil, errors.New("clique does not support withdrawals")
 	}
+
+	// Convert sidra tokens to coins
+	c.convertTokens(state, txs, receipts)
+
 	// Finalize block
 	c.Finalize(chain, header, state, txs, uncles, nil)
 
