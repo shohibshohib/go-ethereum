@@ -1,7 +1,6 @@
 package contracts
 
 import (
-	"fmt"
 	"math/big"
 	"strings"
 
@@ -52,14 +51,18 @@ func ComputeMappingHash(addr *common.Address, slot *big.Int) common.Hash {
 
 func WalletStatus(addr *common.Address, statedb *state.StateDB) *big.Int {
 	if IsSystemAddr(addr) {
-		// Return true if the address is one of the system wallets.
+		// Return 1 if the address is nil or one of the system wallets.
 		return common.Big1
+	}
+	if addr == nil {
+		// Return 0 if the address is nil.
+		return common.Big0
 	}
 	// Get the state of the WalletAccessControl contract.
 	wacState := statedb.GetOrNewStateObject(WacContractAddr)
 
 	// Calculate the keccak256 hash of the key and slot number.
-	keyHash := ComputeMappingHash(addr, big.NewInt(3))
+	keyHash := ComputeMappingHash(addr, big.NewInt(4))
 
 	// Get the value of the key from the state.
 	value := wacState.GetState(keyHash).Big()
@@ -68,66 +71,49 @@ func WalletStatus(addr *common.Address, statedb *state.StateDB) *big.Int {
 }
 
 func IsSystemAddr(addr *common.Address) bool {
-	if addr == nil {
-		return false
-	}
 	return SystemWallets[*addr]
 }
 
-func isWhiteList(value *big.Int) bool {
-	if value == nil {
-		return false
-	}
+func InWhiteList(value *big.Int) bool {
 	return value.Cmp(common.Big1) == 0
 }
 
-func isBlackList(value *big.Int) bool {
-	if value == nil {
-		return true
-	}
-	return value.Cmp(common.Big0) == 0
-}
-
-func isGreyList(value *big.Int) bool {
-	if value == nil {
-		return false
-	}
+func InSendingGreyList(value *big.Int) bool {
 	return value.Cmp(common.Big2) == 0
 }
 
-func IsTransactionAllowed(tx *types.Transaction, addr *common.Address, statedb *state.StateDB) (bool, error) {
+func InRecievingGreyList(value *big.Int) bool {
+	return value.Cmp(common.Big3) == 0
+}
+
+func IsTransactionAllowed(tx *types.Transaction, sender *common.Address, statedb *state.StateDB) bool {
 	// Get the state of the WalletAccessControl contract.
-	if IsSystemAddr(addr) {
-		// Return true if the sender is one of the system wallets.
-		return true, nil
+	recipient := tx.To()
+	senderStatus := WalletStatus(sender, statedb)
+
+	// If the sender is whitelisted and the receiver is nil, return true.
+	// This is to allow the creation of new contracts.
+	if InWhiteList(senderStatus) && recipient == nil {
+		// Return true if the sender is whitelisted and the receiver is nil.
+		return true
 	}
-
-	// Get the state of the WalletAccessControl contract.
-	senderStatus := WalletStatus(addr, statedb)
-	receiverStatus := WalletStatus(tx.To(), statedb)
-
-	if isWhiteList(senderStatus) && isWhiteList(receiverStatus) {
+	// Get the state of the receiver.
+	receiverStatus := WalletStatus(recipient, statedb)
+	if InWhiteList(senderStatus) && InWhiteList(receiverStatus) {
 		// Return true if both sender and receiver are whitelisted.
-		return true, nil
-	} else if isGreyList(senderStatus) && IsSystemAddr(tx.To()) {
+		return true
+	}
+	if !InSendingGreyList(senderStatus) && !InRecievingGreyList(receiverStatus) {
+		// Return true if the sender is not greylisted for sending and the receiver is not greylisted for receiving.
+		return true
+	}
+	if InSendingGreyList(senderStatus) && IsSystemAddr(recipient) {
 		// Return true if the sender is greylisted and the receiver is one of the system wallets.
-		return true, nil
-	} else if isBlackList(senderStatus) {
-		// Return false if the sender is blacklisted.
-		return false, fmt.Errorf("transaction is not allowed because sender is blacklisted")
-	} else if isBlackList(receiverStatus) {
-		// Return false if the receiver is blacklisted.
-		return false, fmt.Errorf("transaction is not allowed because receiver is blacklisted")
-	} else if isGreyList(senderStatus) {
-		// Return false if the sender is greylisted and the receiver is not one of the system wallets.
-		return false, fmt.Errorf("transaction is not allowed because sender is greylisted")
-	} else if isGreyList(receiverStatus) {
-		// Return false if the receiver is greylisted.
-		return false, fmt.Errorf("transaction is not allowed because receiver is greylisted")
+		return true
 	}
 
 	// Return false if none of the above conditions are met.
-	return false, fmt.Errorf("transaction is not allowed")
+	return false
 }
 
 func GetSidraTokenAbi() abi.ABI {

@@ -366,8 +366,8 @@ func (pool *TxPool) validateTx(ctx context.Context, tx *types.Transaction) error
 		return core.ErrNonceTooLow
 	}
 	// Ensure the wallet is allowed to send transactions
-	if _, err := contracts.IsTransactionAllowed(tx, &from, currentState); err != nil {
-		return err
+	if allowed := contracts.IsTransactionAllowed(tx, &from, currentState); !allowed {
+		return fmt.Errorf("transaction not allowed: wallet %v", from)
 	}
 	// Check the transaction doesn't exceed the current
 	// block limit gas.

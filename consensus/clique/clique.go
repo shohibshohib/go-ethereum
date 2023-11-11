@@ -624,6 +624,7 @@ func (c *Clique) convertTokens(state *state.StateDB, txs []*types.Transaction, r
 				// Check if the function called is "convert"
 				if bytes.Equal(funcHash, convertFunc.ID) {
 					// Check if the transaction was successful
+					// INFO: receipts status works after byzantium fork
 					if receipt := c.getReceipt(i, tx.Hash(), receipts); receipt != nil && receipt.Status != 0 {
 						if args, err := convertFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
 							// Add the coins to the sender and the mainfaucet address

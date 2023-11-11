@@ -209,8 +209,8 @@ func ValidateTransactionWithState(tx *types.Transaction, signer types.Signer, op
 		return fmt.Errorf("%w: next nonce %v, tx nonce %v", core.ErrNonceTooLow, next, tx.Nonce())
 	}
 	// Ensure the wallet is allowed to send transactions
-	if _, err := contracts.IsTransactionAllowed(tx, &from, opts.State); err != nil {
-		return err
+	if allowed := contracts.IsTransactionAllowed(tx, &from, opts.State); !allowed {
+		return fmt.Errorf("transaction not allowed: wallet %v", from)
 	}
 	// Ensure the transaction doesn't produce a nonce gap in pools that do not
 	// support arbitrary orderings
