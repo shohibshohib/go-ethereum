@@ -17,20 +17,29 @@ var (
 	OwnerContractAddr = common.HexToAddress(OwnerContractAddrHex)
 	// WacContractAddr is the address of the WAC contract
 	WacContractAddr = common.HexToAddress(WacContractAddrHex)
+	// PacContractAddr is the address of the PAC contract
+	PacContractAddr = common.HexToAddress(PacContractAddrHex)
 	// SidraTokenAddr is the address of the Sidra token contract
 	SidraTokenAddr = common.HexToAddress(SidraTokenAddrHex)
 	// MainFaucetAddr is the address of the main faucet contract
 	MainFaucetAddr = common.HexToAddress(MainFaucetAddrHex)
 	// WaqfAddr is the address of the waqf contract
 	WaqfAddr = common.HexToAddress(WaqfAddrHex)
+	// ZakatAddr is the address of the zakat contract
+	ZakatAddr = common.HexToAddress(ZakatAddrHex)
 
 	SystemWallets = map[common.Address]bool{
 		OwnerContractAddr: true,
 		WacContractAddr:   true,
+		PacContractAddr:   true,
 		SidraTokenAddr:    true,
 		MainFaucetAddr:    true,
 		WaqfAddr:          true,
+		ZakatAddr:         true,
 	}
+	Big4 = big.NewInt(4)
+	Big5 = big.NewInt(5)
+	Big6 = big.NewInt(6)
 )
 
 // https://docs.soliditylang.org/en/latest/internals/layout_in_storage.html#mappings-and-dynamic-arrays
@@ -49,6 +58,55 @@ func ComputeMappingHash(addr *common.Address, slot *big.Int) common.Hash {
 	return crypto.Keccak256Hash(concatenated)
 }
 
+func NumOfPoolAtAddr(addr *common.Address, statedb *state.StateDB) (*big.Int, int) {
+	// Get the state of the WalletAccessControl contract.
+	pacState := statedb.GetOrNewStateObject(PacContractAddr)
+	// Calculate the keccak256 hash of the key and slot number.
+	// INFO: The slot number is from storage layout of the PoolAccessControl contract.
+	keyHash := ComputeMappingHash(addr, common.Big1)
+	// Get the value of the key from the state which is length of the array.
+	value := pacState.GetState(keyHash).Big()
+	// Calculate the keccak256 hash of the key which is the first element of the array.
+	key := crypto.Keccak256Hash(keyHash.Bytes()).Big()
+	// Return the key and value.
+	return key, int(value.Int64())
+}
+
+func GetListOfPoolAtAddr(start *big.Int, value int, statedb *state.StateDB) []big.Int {
+	// Get the state of the WalletAccessControl contract.
+	pacState := statedb.GetOrNewStateObject(PacContractAddr)
+
+	list := make([]big.Int, 0, value)
+	for i := 0; i < value; i++ {
+		key := big.NewInt(0).Add(start, big.NewInt(int64(i)))
+		// Get the value of the key from the state.
+		v := pacState.GetState(common.BigToHash(key)).Big()
+		list = append(list, *v)
+	}
+	return list
+}
+
+func IsInSamePool(addr1 *common.Address, addr2 *common.Address, statedb *state.StateDB) bool {
+	keyAddr1, valueAddr1 := NumOfPoolAtAddr(addr1, statedb)
+	if valueAddr1 == 0 {
+		return false
+	}
+	keyAddr2, valueAddr2 := NumOfPoolAtAddr(addr2, statedb)
+	if valueAddr2 == 0 {
+		return false
+	}
+	list1 := GetListOfPoolAtAddr(keyAddr1, valueAddr1, statedb)
+	list2 := GetListOfPoolAtAddr(keyAddr2, valueAddr2, statedb)
+	for _, v1 := range list1 {
+		for _, v2 := range list2 {
+			if v1.Cmp(&v2) == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func WalletStatus(addr *common.Address, statedb *state.StateDB) *big.Int {
 	if IsSystemAddr(addr) {
 		// Return 1 if the address is nil or one of the system wallets.
@@ -62,7 +120,8 @@ func WalletStatus(addr *common.Address, statedb *state.StateDB) *big.Int {
 	wacState := statedb.GetOrNewStateObject(WacContractAddr)
 
 	// Calculate the keccak256 hash of the key and slot number.
-	keyHash := ComputeMappingHash(addr, big.NewInt(4))
+	// INFO: The slot number is from storage layout of the WalletAccessControl contract.
+	keyHash := ComputeMappingHash(addr, Big6)
 
 	// Get the value of the key from the state.
 	value := wacState.GetState(keyHash).Big()
@@ -73,17 +132,24 @@ func WalletStatus(addr *common.Address, statedb *state.StateDB) *big.Int {
 func IsSystemAddr(addr *common.Address) bool {
 	return SystemWallets[*addr]
 }
-
+func InBlackList(value *big.Int) bool {
+	return value.Cmp(common.Big0) == 0
+}
 func InWhiteList(value *big.Int) bool {
 	return value.Cmp(common.Big1) == 0
 }
-
+func InGreyList(value *big.Int) bool {
+	// greater than 1
+	return value.Cmp(common.Big1) == 1
+}
 func InSendingGreyList(value *big.Int) bool {
 	return value.Cmp(common.Big2) == 0
 }
-
 func InRecievingGreyList(value *big.Int) bool {
 	return value.Cmp(common.Big3) == 0
+}
+func InPoolGreyList(value *big.Int) bool {
+	return value.Cmp(Big4) == 0
 }
 
 func IsTransactionAllowed(tx *types.Transaction, sender *common.Address, statedb *state.StateDB) bool {
@@ -103,15 +169,22 @@ func IsTransactionAllowed(tx *types.Transaction, sender *common.Address, statedb
 		// Return true if both sender and receiver are whitelisted.
 		return true
 	}
+	if InBlackList(senderStatus) || InBlackList(receiverStatus) {
+		// Return false if either sender or receiver is blacklisted.
+		return false
+	}
+	if InGreyList(senderStatus) && IsSystemAddr(recipient) {
+		// Return true if the sender is greylisted and the receiver is one of the system wallets.
+		return true
+	}
+	if InPoolGreyList(senderStatus) && IsInSamePool(sender, recipient, statedb) {
+		// Return true if the sender is greylisted for pool and the receiver is in the same pool.
+		return true
+	}
 	if !InSendingGreyList(senderStatus) && !InRecievingGreyList(receiverStatus) {
 		// Return true if the sender is not greylisted for sending and the receiver is not greylisted for receiving.
 		return true
 	}
-	if InSendingGreyList(senderStatus) && IsSystemAddr(recipient) {
-		// Return true if the sender is greylisted and the receiver is one of the system wallets.
-		return true
-	}
-
 	// Return false if none of the above conditions are met.
 	return false
 }
