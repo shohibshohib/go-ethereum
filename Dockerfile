@@ -1,8 +1,3 @@
-# Support setting various labels on the final image
-ARG COMMIT=""
-ARG VERSION=""
-ARG BUILDNUM=""
-
 # Build Geth in a stock Go builder container
 FROM golang:1.20-alpine as builder
 
@@ -17,7 +12,7 @@ ADD . /go-ethereum
 RUN cd /go-ethereum && go run build/ci.go install -static
 
 # Pull all binaries into a second stage deploy alpine container
-FROM ubuntu:22.04
+FROM ubuntu:latest
 
 # RUN apk add --no-cache ca-certificates
 RUN apt-get update && apt-get install -y ca-certificates \
@@ -28,10 +23,3 @@ RUN apt-get update && apt-get install -y ca-certificates \
 COPY --from=builder /go-ethereum/build/bin/* /usr/local/bin/
 
 EXPOSE 8545 8546 30303 30303/udp
-
-# Add some metadata labels to help programatic image consumption
-ARG COMMIT=""
-ARG VERSION=""
-ARG BUILDNUM=""
-
-LABEL commit="$COMMIT" version="$VERSION" buildnum="$BUILDNUM"
