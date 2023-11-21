@@ -569,25 +569,20 @@ func (c *Clique) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 	return nil
 }
 
-// Finalize implements consensus.Engine. There is no post-transaction
-// consensus rules in clique, do nothing here.
-func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, withdrawals []*types.Withdrawal) {
-	// No block rewards in PoA, so the state remains as is
-}
-
-// getReceipt returns the receipt of a transaction by checking if the receipt at the given index matches the transaction hash.
-// If not found by index, it searches the entire slice of receipts.
-func (c *Clique) getReceipt(index int, txHash common.Hash, receipts []*types.Receipt) *types.Receipt {
+// isTxSuccess returns whether a transaction is valid and successful.
+// INFO: This function is copied from core/state_processor.go
+func (c *Clique) isTxSuccess(index int, txHash common.Hash, receipts []*types.Receipt) bool {
 	if index < len(receipts) && receipts[index].TxHash == txHash {
-		return receipts[index]
+		return receipts[index].Status == types.ReceiptStatusSuccessful
 	}
 
+	// This code is just for extra safety, it should never be executed
 	for _, receipt := range receipts {
 		if receipt.TxHash == txHash {
-			return receipt
+			return receipt.Status == types.ReceiptStatusSuccessful
 		}
 	}
-	return nil
+	return false
 }
 
 // getTxSender returns the sender of a transaction.
@@ -595,7 +590,7 @@ func (c *Clique) getTxSender(tx *types.Transaction) (common.Address, error) {
 	return types.Sender(types.NewEIP155Signer(tx.ChainId()), tx)
 }
 
-func (c *Clique) accumulateRewards(addr *common.Address, amount *big.Int, state *state.StateDB) {
+func addCoin(addr *common.Address, amount *big.Int, state *state.StateDB) {
 	// Calculate the amount of coins to send to the sender and the mainfaucet address
 	mainFaucetAmount := new(big.Int).Mul(amount, big.NewInt(4))
 
@@ -604,9 +599,12 @@ func (c *Clique) accumulateRewards(addr *common.Address, amount *big.Int, state 
 	state.AddBalance(contracts.MainFaucetAddr, mainFaucetAmount)
 }
 
-// convertTokens checks each transaction that is directed to the sidra token contract. If the function called is "convert" and
-// the transaction is successful, it converts the sidra tokens to coins and sends them to the transaction sender and the mainfaucet address.
-func (c *Clique) convertTokens(state *state.StateDB, txs []*types.Transaction, receipts []*types.Receipt) {
+func revertOwnerGas(addr common.Address, state *state.StateDB, tx *types.Transaction) {
+	// Refund the gas used if owner is doing a transaction
+	state.AddBalance(addr, new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas()), new(big.Int).SetUint64(tx.GasPrice().Uint64())))
+}
+
+func (c *Clique) accumulateRewards(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, receipts []*types.Receipt) {
 	mintFunc := sidraTokenAbi.Methods["mint"]
 	convertFunc := sidraTokenAbi.Methods["convert"]
 
@@ -614,35 +612,41 @@ func (c *Clique) convertTokens(state *state.StateDB, txs []*types.Transaction, r
 
 	for i, tx := range txs {
 		if sender, err := c.getTxSender(tx); err == nil {
-			// Refund the gas used if owner is doing a transaction
 			if sender == ownerAddr {
-				state.AddBalance(sender, new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas()), new(big.Int).SetUint64(tx.GasPrice().Uint64())))
+				// Refund the gas used if owner is doing a transaction
+				revertOwnerGas(sender, state, tx)
 			}
+			// Check if the transaction is valid and successful
+			if !c.isTxSuccess(i, tx.Hash(), receipts) {
+				// If the transaction is not successful, continue
+				continue
+			}
+
 			// Check if the transaction is directed to the sidra token contract
 			if tx.To().Cmp(contracts.SidraTokenAddr) == 0 && len(tx.Data()) > 4 {
 				funcHash := tx.Data()[:4]
 				// Check if the function called is "convert"
 				if bytes.Equal(funcHash, convertFunc.ID) {
-					// Check if the transaction was successful
-					// INFO: receipts status works after byzantium fork
-					if receipt := c.getReceipt(i, tx.Hash(), receipts); receipt != nil && receipt.Status != 0 {
-						if args, err := convertFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
-							// Add the coins to the sender and the mainfaucet address
-							c.accumulateRewards(&sender, args[0].(*big.Int), state)
-						}
+					if args, err := convertFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
+						// Add the coins to the sender and the mainfaucet address
+						addCoin(&sender, args[0].(*big.Int), state)
 					}
 				} else if bytes.Equal(funcHash, mintFunc.ID) {
-					// Check if the transaction was successful
-					if receipt := c.getReceipt(i, tx.Hash(), receipts); receipt != nil && receipt.Status != 0 {
-						if args, err := mintFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
-							// Add the coins to the sender and the mainfaucet address
-							c.accumulateRewards(args[0].(*common.Address), args[1].(*big.Int), state)
-						}
+					if args, err := mintFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
+						// Add the coins to the sender and the mainfaucet address
+						addCoin(args[0].(*common.Address), args[1].(*big.Int), state)
 					}
 				}
 			}
 		}
 	}
+}
+
+// Finalize implements consensus.Engine. There is no post-transaction
+// consensus rules in clique, do nothing here.
+func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, withdrawals []*types.Withdrawal, receipts []*types.Receipt) {
+	// Distribute rewards
+	c.accumulateRewards(chain, header, state, txs, receipts)
 }
 
 // FinalizeAndAssemble implements consensus.Engine, ensuring no uncles are set,
@@ -652,11 +656,8 @@ func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *
 		return nil, errors.New("clique does not support withdrawals")
 	}
 
-	// Convert sidra tokens to coins
-	c.convertTokens(state, txs, receipts)
-
 	// Finalize block
-	c.Finalize(chain, header, state, txs, uncles, nil)
+	c.Finalize(chain, header, state, txs, uncles, withdrawals, receipts)
 
 	// Assign the final state root to header.
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))

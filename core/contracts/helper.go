@@ -108,7 +108,7 @@ func IsInSamePool(addr1 *common.Address, addr2 *common.Address, statedb *state.S
 }
 
 func WalletStatus(addr *common.Address, statedb *state.StateDB) *big.Int {
-	if IsSystemAddr(addr) {
+	if IsSystemContract(*addr) {
 		// Return 1 if the address is nil or one of the system wallets.
 		return common.Big1
 	}
@@ -129,8 +129,8 @@ func WalletStatus(addr *common.Address, statedb *state.StateDB) *big.Int {
 	return value
 }
 
-func IsSystemAddr(addr *common.Address) bool {
-	return SystemWallets[*addr]
+func IsSystemContract(addr common.Address) bool {
+	return SystemWallets[addr]
 }
 func InBlackList(value *big.Int) bool {
 	return value.Cmp(common.Big0) == 0
@@ -173,7 +173,7 @@ func IsTransactionAllowed(tx *types.Transaction, sender *common.Address, statedb
 		// Return false if either sender or receiver is blacklisted.
 		return false
 	}
-	if InGreyList(senderStatus) && IsSystemAddr(recipient) {
+	if InGreyList(senderStatus) && IsSystemContract(*recipient) {
 		// Return true if the sender is greylisted and the receiver is one of the system wallets.
 		return true
 	}
