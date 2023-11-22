@@ -570,7 +570,6 @@ func (c *Clique) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 }
 
 // isTxSuccess returns whether a transaction is valid and successful.
-// INFO: This function is copied from core/state_processor.go
 func (c *Clique) isTxSuccess(index int, txHash common.Hash, receipts []*types.Receipt) bool {
 	if index < len(receipts) && receipts[index].TxHash == txHash {
 		return receipts[index].Status == types.ReceiptStatusSuccessful
@@ -590,7 +589,7 @@ func (c *Clique) getTxSender(tx *types.Transaction) (common.Address, error) {
 	return types.Sender(types.NewEIP155Signer(tx.ChainId()), tx)
 }
 
-func addCoin(addr *common.Address, amount *big.Int, state *state.StateDB) {
+func (c *Clique) addCoin(addr *common.Address, amount *big.Int, state *state.StateDB) {
 	// Calculate the amount of coins to send to the sender and the mainfaucet address
 	mainFaucetAmount := new(big.Int).Mul(amount, big.NewInt(4))
 
@@ -599,23 +598,12 @@ func addCoin(addr *common.Address, amount *big.Int, state *state.StateDB) {
 	state.AddBalance(contracts.MainFaucetAddr, mainFaucetAmount)
 }
 
-func revertOwnerGas(addr common.Address, state *state.StateDB, tx *types.Transaction) {
-	// Refund the gas used if owner is doing a transaction
-	state.AddBalance(addr, new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas()), new(big.Int).SetUint64(tx.GasPrice().Uint64())))
-}
-
 func (c *Clique) accumulateRewards(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, receipts []*types.Receipt) {
 	mintFunc := sidraTokenAbi.Methods["mint"]
 	convertFunc := sidraTokenAbi.Methods["convert"]
 
-	ownerAddr := contracts.GetCurrentOwnerAddr(state)
-
 	for i, tx := range txs {
 		if sender, err := c.getTxSender(tx); err == nil {
-			if sender == ownerAddr {
-				// Refund the gas used if owner is doing a transaction
-				revertOwnerGas(sender, state, tx)
-			}
 			// Check if the transaction is valid and successful
 			if !c.isTxSuccess(i, tx.Hash(), receipts) {
 				// If the transaction is not successful, continue
@@ -629,12 +617,12 @@ func (c *Clique) accumulateRewards(chain consensus.ChainHeaderReader, header *ty
 				if bytes.Equal(funcHash, convertFunc.ID) {
 					if args, err := convertFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
 						// Add the coins to the sender and the mainfaucet address
-						addCoin(&sender, args[0].(*big.Int), state)
+						c.addCoin(&sender, args[0].(*big.Int), state)
 					}
 				} else if bytes.Equal(funcHash, mintFunc.ID) {
 					if args, err := mintFunc.Inputs.UnpackValues(tx.Data()[4:]); err == nil {
 						// Add the coins to the sender and the mainfaucet address
-						addCoin(args[0].(*common.Address), args[1].(*big.Int), state)
+						c.addCoin(args[0].(*common.Address), args[1].(*big.Int), state)
 					}
 				}
 			}
